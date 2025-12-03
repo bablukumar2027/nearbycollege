@@ -1,7 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import './ConnectCounsellor.css';
+import { useAuth } from './AuthContext';
 
 const StudentRequestForm = () => {
+  const { user, token } = useAuth();
+  const currentStudentId = user?.id || user?._id || user?.userId;
+  
   const [formData, setFormData] = useState({
     name: '',
     language: '',
@@ -17,23 +21,49 @@ const StudentRequestForm = () => {
   const [loadingRequests, setLoadingRequests] = useState(true);
   const [deletingId, setDeletingId] = useState(null);
 
-  // Fetch requests from backend on component mount with localStorage fallback
+  // Fetch only current student's requests
   useEffect(() => {
     const fetchRequests = async () => {
+      if (!currentStudentId) {
+        console.log('No user logged in');
+        setSentRequests([]);
+        setLoadingRequests(false);
+        return;
+      }
+
       try {
-        const resp = await fetch("http://localhost:8000/api/requests");
+        const headers = {
+          'Content-Type': 'application/json',
+        };
+        
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+
+        console.log('Fetching requests for student:', currentStudentId);
+        
+        const resp = await fetch(`http://localhost:8000/api/requests/student/${currentStudentId}`, {
+          headers: headers
+        });
+        
         if (resp.ok) {
           const result = await resp.json();
+          console.log('Received requests:', result.requests);
           setSentRequests(result.requests || []);
         } else {
           throw new Error('Failed to fetch from API');
         }
       } catch (error) {
         console.error('Error fetching requests:', error);
-        // Fallback to localStorage if API fails
-        const savedRequests = localStorage.getItem('counselingRequests');
+        // Fallback to localStorage with student ID filter
+        const studentSpecificKey = `counselingRequests_${currentStudentId}`;
+        const savedRequests = localStorage.getItem(studentSpecificKey);
         if (savedRequests) {
-          setSentRequests(JSON.parse(savedRequests));
+          const requests = JSON.parse(savedRequests);
+          const studentRequests = requests.filter(req => req.studentId === currentStudentId);
+          setSentRequests(studentRequests);
+        } else {
+          setSentRequests([]);
         }
       } finally {
         setLoadingRequests(false);
@@ -41,14 +71,15 @@ const StudentRequestForm = () => {
     };
 
     fetchRequests();
-  }, []);
+  }, [currentStudentId, token]);
 
-  // Save to localStorage as backup whenever sentRequests changes
+  // Save to localStorage with student-specific key
   useEffect(() => {
-    if (sentRequests.length > 0) {
-      localStorage.setItem('counselingRequests', JSON.stringify(sentRequests));
+    if (sentRequests.length > 0 && currentStudentId) {
+      const studentSpecificKey = `counselingRequests_${currentStudentId}`;
+      localStorage.setItem(studentSpecificKey, JSON.stringify(sentRequests));
     }
-  }, [sentRequests]);
+  }, [sentRequests, currentStudentId]);
 
   const languages = [
     'English',
@@ -81,13 +112,33 @@ const StudentRequestForm = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    
+    if (!currentStudentId) {
+      alert('Please log in to submit a request');
+      return;
+    }
+    
     setIsSubmitting(true);
     
     try {
+      const requestData = {
+        ...formData,
+        studentId: currentStudentId,
+        studentName: user?.name || formData.name
+      };
+
+      const headers = {
+        'Content-Type': 'application/json',
+      };
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const resp = await fetch("http://localhost:8000/api/requests", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData)
+        headers: headers,
+        body: JSON.stringify(requestData)
       });
 
       const result = await resp.json();
@@ -95,7 +146,7 @@ const StudentRequestForm = () => {
       if (resp.ok && result.success) {
         const newRequest = {
           id: result.request._id || Date.now(),
-          ...formData,
+          ...requestData,
           status: result.request.status || 'pending',
           submittedDate: new Date().toLocaleDateString(),
           submittedTime: new Date().toLocaleTimeString(),
@@ -117,15 +168,16 @@ const StudentRequestForm = () => {
       }
     } catch (error) {
       console.error('Error submitting request:', error);
-      // Even if API fails, save locally for offline capability
       const newRequest = {
         id: Date.now(),
         ...formData,
+        studentId: currentStudentId,
+        studentName: user?.name || formData.name,
         status: 'pending',
         submittedDate: new Date().toLocaleDateString(),
         submittedTime: new Date().toLocaleTimeString(),
         timestamp: new Date().toISOString(),
-        localSave: true // Mark as locally saved
+        localSave: true
       };
       
       setSentRequests(prev => [newRequest, ...prev]);
@@ -154,9 +206,17 @@ const StudentRequestForm = () => {
 
     try {
       if (!isLocalSave) {
-        // Delete from MongoDB
+        const headers = {
+          'Content-Type': 'application/json',
+        };
+        
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+
         const resp = await fetch(`http://localhost:8000/api/requests/${requestId}`, {
           method: "DELETE",
+          headers: headers
         });
 
         if (!resp.ok) {
@@ -164,15 +224,14 @@ const StudentRequestForm = () => {
         }
       }
 
-      // Remove from local state
       setSentRequests(prev => prev.filter(request => request.id !== requestId));
       
-      // Update localStorage
+      const studentSpecificKey = `counselingRequests_${currentStudentId}`;
       const updatedRequests = sentRequests.filter(request => request.id !== requestId);
       if (updatedRequests.length > 0) {
-        localStorage.setItem('counselingRequests', JSON.stringify(updatedRequests));
+        localStorage.setItem(studentSpecificKey, JSON.stringify(updatedRequests));
       } else {
-        localStorage.removeItem('counselingRequests');
+        localStorage.removeItem(studentSpecificKey);
       }
 
     } catch (error) {
@@ -237,9 +296,41 @@ const StudentRequestForm = () => {
           <div className="shape shape-1"></div>
           <div className="shape shape-2"></div>
           <div className="shape shape-3"></div>
+          <div className="shape shape-4"></div>
         </div>
       </div>
       
+      {/* Enhanced User Profile Header */}
+      <div className="user-profile-header">
+        <div className="profile-content">
+          <div className="profile-avatar">
+            <div className="avatar-icon">
+              {user?.name ? user.name.charAt(0).toUpperCase() : '👤'}
+            </div>
+          </div>
+          <div className="profile-info">
+            <h1 className="profile-welcome">
+              {user?.name ? `Welcome, ${user.name}!` : 'Welcome to Counseling Services'}
+            </h1>
+            <p className="profile-subtitle">
+              {user?.name ? 'Connect with professional counselors for support' : 'Please log in to access counseling services'}
+            </p>
+            {currentStudentId && (
+              <div className="profile-meta">
+                <span className="user-id-badge">
+                  <span className="meta-icon">🆔</span>
+                  Student ID: {currentStudentId}
+                </span>
+                <span className="request-count">
+                  <span className="meta-icon">📋</span>
+                  {sentRequests.length} Request{sentRequests.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className="dashboard-content">
         {/* Left Side - Request Form */}
         <div className="form-section">
@@ -251,6 +342,12 @@ const StudentRequestForm = () => {
                 <p className="subtitle">
                   Fill out the form below and our professional counselors will get in touch with you
                 </p>
+                {!currentStudentId && (
+                  <div className="login-warning">
+                    <span className="warning-icon">⚠️</span>
+                    Please log in to submit and view your requests
+                  </div>
+                )}
               </div>
             </div>
 
@@ -267,8 +364,9 @@ const StudentRequestForm = () => {
                   value={formData.name}
                   onChange={handleChange}
                   className="form-input"
-                  placeholder="Enter your full name"
+                  placeholder={user?.name ? `Logged in as: ${user.name}` : "Enter your full name"}
                   required
+                  disabled={!currentStudentId}
                 />
               </div>
 
@@ -285,6 +383,7 @@ const StudentRequestForm = () => {
                     onChange={handleChange}
                     className="form-select"
                     required
+                    disabled={!currentStudentId}
                   >
                     <option value="">Select your preferred language</option>
                     {languages.map(lang => (
@@ -305,6 +404,7 @@ const StudentRequestForm = () => {
                     onChange={handleChange}
                     className="form-select"
                     required
+                    disabled={!currentStudentId}
                   >
                     <option value="">Select a reason</option>
                     {reasons.map(reason => (
@@ -327,8 +427,9 @@ const StudentRequestForm = () => {
                     value={formData.email}
                     onChange={handleChange}
                     className="form-input"
-                    placeholder="Enter your email"
+                    placeholder={user?.email ? `Logged in email: ${user.email}` : "Enter your email"}
                     required
+                    disabled={!currentStudentId}
                   />
                 </div>
 
@@ -346,6 +447,7 @@ const StudentRequestForm = () => {
                     className="form-input"
                     placeholder="Enter your phone number"
                     required
+                    disabled={!currentStudentId}
                   />
                 </div>
               </div>
@@ -363,18 +465,24 @@ const StudentRequestForm = () => {
                   className="form-textarea"
                   placeholder="Any additional details you'd like to share with the counselor..."
                   rows="4"
+                  disabled={!currentStudentId}
                 />
               </div>
 
               <button
                 type="submit"
-                className={`submit-button ${isSubmitting ? 'submitting' : ''}`}
-                disabled={isSubmitting}
+                className={`submit-button ${isSubmitting ? 'submitting' : ''} ${!currentStudentId ? 'disabled' : ''}`}
+                disabled={isSubmitting || !currentStudentId}
               >
                 {isSubmitting ? (
                   <>
                     <div className="spinner"></div>
                     Sending Request...
+                  </>
+                ) : !currentStudentId ? (
+                  <>
+                    <span className="button-icon">🔒</span>
+                    Please Log In to Submit
                   </>
                 ) : (
                   <>
@@ -393,79 +501,119 @@ const StudentRequestForm = () => {
             <div className="card-header">
               <div className="header-icon">📋</div>
               <div className="requests-header">
-                <h2 className="requests-title">Your Sent Requests</h2>
+                <h2 className="requests-title">
+                  {currentStudentId ? 'Your Counseling Requests' : 'Counseling Requests'}
+                </h2>
                 <p className="requests-subtitle">
-                  Track the status of your counseling requests
+                  {currentStudentId 
+                    ? 'Track the status of your counseling requests below'
+                    : 'Log in to view and manage your requests'
+                  }
                 </p>
-                {sentRequests.length > 0 && (
-                  <div className="requests-count">
-                    Total Requests: {sentRequests.length}
+                {sentRequests.length > 0 && currentStudentId && (
+                  <div className="requests-stats">
+                    <div className="stat-item">
+                      <span className="stat-number">{sentRequests.length}</span>
+                      <span className="stat-label">Total Requests</span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-number">
+                        {sentRequests.filter(req => req.status === 'pending').length}
+                      </span>
+                      <span className="stat-label">Pending</span>
+                    </div>
+                    <div className="stat-item">
+                      <span className="stat-number">
+                        {sentRequests.filter(req => req.status === 'accepted').length}
+                      </span>
+                      <span className="stat-label">Accepted</span>
+                    </div>
                   </div>
                 )}
               </div>
             </div>
 
             <div className="requests-list">
-              {loadingRequests ? (
+              {!currentStudentId ? (
                 <div className="empty-state">
-                  <div className="spinner"></div>
-                  <h3>Loading Requests...</h3>
+                  <div className="empty-icon">🔒</div>
+                  <h3>Authentication Required</h3>
+                  <p>Please log in to view your counseling requests</p>
+                </div>
+              ) : loadingRequests ? (
+                <div className="empty-state">
+                  <div className="spinner large"></div>
+                  <h3>Loading Your Requests...</h3>
+                  <p>Please wait while we fetch your data</p>
                 </div>
               ) : sentRequests.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-icon">📝</div>
                   <h3>No Requests Yet</h3>
-                  <p>Your sent requests will appear here</p>
+                  <p>Submit your first counseling request using the form</p>
+                  <button 
+                    className="create-first-request"
+                    onClick={() => document.querySelector('.form-section')?.scrollIntoView({ behavior: 'smooth' })}
+                  >
+                    Create Your First Request
+                  </button>
                 </div>
               ) : (
-                sentRequests.map(request => (
-                  <div key={request.id} className="request-item">
-                    <div className="request-header">
-                      <div className="request-info">
-                        <h4 className="request-name">{request.name}</h4>
-                        <span className="request-meta">
-                          {request.submittedDate} • {request.language}
-                          {request.localSave && <span className="local-badge"> (Local)</span>}
-                        </span>
-                      </div>
-                      <div className="request-actions">
-                        {getStatusBadge(request.status)}
-                        <button
-                          className={`delete-button ${deletingId === request.id ? 'deleting' : ''}`}
-                          onClick={() => handleDeleteRequest(request.id, request.localSave)}
-                          disabled={deletingId === request.id}
-                        >
-                          {deletingId === request.id ? (
-                            <div className="spinner small"></div>
-                          ) : (
-                            '🗑️'
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                    
-                    <div className="request-details">
-                      <div className="detail-grid">
-                        <div className="detail-item">
-                          <span className="detail-label">Reason:</span>
-                          <span className="detail-value">{request.reason}</span>
+                <div className="requests-grid">
+                  {sentRequests.map(request => (
+                    <div key={request.id} className="request-item">
+                      <div className="request-header">
+                        <div className="request-info">
+                          <h4 className="request-name">{request.name}</h4>
+                          <span className="request-meta">
+                            {request.submittedDate} • {request.language}
+                            {request.localSave && <span className="local-badge">Local</span>}
+                          </span>
                         </div>
-                        
-                        <div className="detail-item">
-                          <span className="detail-label">Contact:</span>
-                          <span className="detail-value">{request.email} • {request.phone}</span>
+                        <div className="request-actions">
+                          {getStatusBadge(request.status)}
+                          <button
+                            className={`delete-button ${deletingId === request.id ? 'deleting' : ''}`}
+                            onClick={() => handleDeleteRequest(request.id, request.localSave)}
+                            disabled={deletingId === request.id}
+                            title="Delete request"
+                          >
+                            {deletingId === request.id ? (
+                              <div className="spinner small"></div>
+                            ) : (
+                              '🗑️'
+                            )}
+                          </button>
                         </div>
-                        
-                        {request.additionalInfo && (
-                          <div className="detail-item full-width">
-                            <span className="detail-label">Additional Info:</span>
-                            <span className="detail-value">{request.additionalInfo}</span>
+                      </div>
+                      
+                      <div className="request-details">
+                        <div className="detail-grid">
+                          <div className="detail-item">
+                            <span className="detail-label">Reason:</span>
+                            <span className="detail-value">{request.reason}</span>
                           </div>
-                        )}
+                          
+                          <div className="detail-item">
+                            <span className="detail-label">Contact:</span>
+                            <span className="detail-value">
+                              <span className="contact-email">{request.email}</span>
+                              <span className="contact-separator">•</span>
+                              <span className="contact-phone">{request.phone}</span>
+                            </span>
+                          </div>
+                          
+                          {request.additionalInfo && (
+                            <div className="detail-item full-width">
+                              <span className="detail-label">Additional Info:</span>
+                              <span className="detail-value">{request.additionalInfo}</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))
+                  ))}
+                </div>
               )}
             </div>
           </div>
